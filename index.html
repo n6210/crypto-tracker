@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ATOM / DOT Tracker</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #0e1117;
+      --card: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-bright: #f0f6fc;
+      --primary: #58a6ff;
+      --accent: #238636;
+      --accent-hover: #2ea043;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    .container {
+      background-color: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      width: 100%;
+      max-width: 900px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    }
+
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .title-group {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 4px 10px;
+    }
+
+    .title-group h1 {
+      font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-bright);
+      margin: 0;
+    }
+
+    .current-rate,
+    .inverse-rate {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 0.9rem;
+      font-weight: 400;
+      color: #8b949e;
+    }
+
+    .rate-separator {
+      color: #8b949e;
+      font-size: 0.9rem;
+    }
+
+    .sub-prices {
+      flex-basis: 100%;
+      font-size: 0.9rem;
+      color: #8b949e;
+      margin-top: 4px;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+
+    button {
+      background-color: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    button:hover {
+      border-color: var(--primary);
+      color: var(--text-bright);
+    }
+
+    button.active {
+      background-color: var(--primary);
+      border-color: var(--primary);
+      color: #000;
+      font-weight: bold;
+    }
+
+    .chart-box {
+      position: relative;
+      height: 400px;
+      width: 100%;
+    }
+
+    .loader {
+      display: none;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(14, 17, 23, 0.85);
+      padding: 12px 24px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <div class="header">
+      <div class="title-group">
+        <h1>ATOM / DOT</h1>
+        <div class="current-rate" id="currentRate">Ładowanie...</div>
+        <span class="rate-separator">|</span>
+        <div class="inverse-rate" id="inverseRate">Ładowanie...</div>
+        <div class="sub-prices" id="subPrices">ATOM: $-- | DOT: $--</div>
+      </div>
+    </div>
+
+    <!-- Przyciski interwałów -->
+    <div class="btn-group" id="intervals">
+      <button data-tf="1h">1h</button>
+      <button data-tf="4h">4h</button>
+      <button data-tf="8h">8h</button>
+      <button data-tf="24h" class="active">24h</button>
+      <button data-tf="7d">7d</button>
+      <button data-tf="30d">30d</button>
+      <button data-tf="6m">6m</button>
+      <button data-tf="1y">1y</button>
+    </div>
+
+    <div class="chart-box">
+      <div class="loader" id="loader">Pobieranie danych z rynku...</div>
+      <canvas id="ratioChart"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // Konfiguracja pobierania danych Binance dla wybranego zakresu
+    const TIMEFRAMES = {
+      '1h':  { interval: '1m',  limit: 60 },
+      '4h':  { interval: '3m',  limit: 80 },
+      '8h':  { interval: '5m',  limit: 96 },
+      '24h': { interval: '15m', limit: 96 },
+      '7d':  { interval: '2h',  limit: 84 },
+      '30d': { interval: '6h',  limit: 120 },
+      '6m':  { interval: '1d',  limit: 180 },
+      '1y':  { interval: '1d',  limit: 365 }
+    };
+
+    let activeTf = '24h';
+    let chartInstance = null;
+
+    const currentRateEl = document.getElementById('currentRate');
+    const inverseRateEl = document.getElementById('inverseRate');
+    const subPricesEl = document.getElementById('subPrices');
+    const loaderEl = document.getElementById('loader');
+
+    const priceLinesPlugin = {
+      id: 'priceLines',
+      afterDatasetsDraw(chart) {
+        const dataset = chart.data.datasets[0];
+        if (!dataset.data.length) return;
+
+        const { ctx, chartArea, scales } = chart;
+        const activeElement = chart.getActiveElements()[0]?.element;
+        const referencePoint = activeElement || chart.getDatasetMeta(0).data[dataset.data.length - 1];
+        const latestPrice = dataset.data[dataset.data.length - 1];
+        const averagePrice = dataset.data.reduce((sum, price) => sum + price, 0) / dataset.data.length;
+
+        ctx.save();
+        ctx.lineWidth = 1;
+
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+        ctx.beginPath();
+        ctx.moveTo(referencePoint.x, chartArea.top);
+        ctx.lineTo(referencePoint.x, chartArea.bottom);
+        ctx.stroke();
+
+        ctx.strokeStyle = '#ffd700';
+        ctx.beginPath();
+        ctx.moveTo(chartArea.left, scales.y.getPixelForValue(latestPrice));
+        ctx.lineTo(chartArea.right, scales.y.getPixelForValue(latestPrice));
+        ctx.stroke();
+
+        ctx.strokeStyle = '#2ea043';
+        ctx.beginPath();
+        ctx.moveTo(chartArea.left, scales.y.getPixelForValue(averagePrice));
+        ctx.lineTo(chartArea.right, scales.y.getPixelForValue(averagePrice));
+        ctx.stroke();
+
+        ctx.restore();
+      }
+    };
+
+    // Inicjalizacja pustego wykresu Chart.js
+    function initChart() {
+      const ctx = document.getElementById('ratioChart').getContext('2d');
+      chartInstance = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [{
+            label: '1 ATOM = x DOT',
+            data: [],
+            borderColor: '#58a6ff',
+            backgroundColor: 'rgba(88, 166, 255, 0.08)',
+            borderWidth: 2,
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            pointBackgroundColor: '#58a6ff',
+            pointBorderColor: '#f0f6fc',
+            pointBorderWidth: 1,
+            pointHitRadius: 10,
+            fill: true,
+            tension: 0.2
+          }]
+        },
+        plugins: [priceLinesPlugin],
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: {
+            mode: 'index',
+            intersect: false
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              displayColors: false,
+              callbacks: {
+                label: (ctx) => {
+                  const atomDot = ctx.parsed.y;
+                  const dotAtom = atomDot ? 1 / atomDot : 0;
+                  return [
+                    `ATOM/DOT: ${atomDot.toFixed(4)} DOT`,
+                    `DOT/ATOM: ${dotAtom.toFixed(4)} ATOM`
+                  ];
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { color: '#21262d' },
+              ticks: { color: '#8b949e', maxTicksLimit: 8 }
+            },
+            y: {
+              grid: { color: '#21262d' },
+              ticks: {
+                color: '#8b949e',
+                callback: (val) => val.toFixed(4)
+              }
+            }
+          }
+        }
+      });
+    }
+
+    // Pobieranie świeczek (k-lines) z Binance
+    async function fetchKlines(symbol, interval, limit) {
+      const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Błąd pobierania danych');
+      return await res.json();
+    }
+
+    // Aktualizacja widoku i wykresu
+    async function loadData(tfKey) {
+      loaderEl.style.display = 'block';
+      const conf = TIMEFRAMES[tfKey];
+
+      try {
+        const [atomKlines, dotKlines] = await Promise.all([
+          fetchKlines('ATOMUSDT', conf.interval, conf.limit),
+          fetchKlines('DOTUSDT', conf.interval, conf.limit)
+        ]);
+
+        const labels = [];
+        const ratios = [];
+
+        // Przeliczanie par punkt po punkcie
+        const len = Math.min(atomKlines.length, dotKlines.length);
+        for (let i = 0; i < len; i++) {
+          const timestamp = atomKlines[i][0];
+          const atomClose = parseFloat(atomKlines[i][4]);
+          const dotClose = parseFloat(dotKlines[i][4]);
+
+          const ratio = atomClose / dotClose;
+
+          const date = new Date(timestamp);
+          const formattedDate = (tfKey === '6m' || tfKey === '1y')
+            ? date.toLocaleDateString([], { month: 'short', day: 'numeric' })
+            : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+          labels.push(formattedDate);
+          ratios.push(ratio);
+        }
+
+        // Uaktualnienie nagłówka (ostatnia świeca)
+        const lastAtom = parseFloat(atomKlines[len - 1][4]);
+        const lastDot = parseFloat(dotKlines[len - 1][4]);
+        const latestRatio = lastAtom / lastDot;
+
+        currentRateEl.innerText = `1 ATOM = ${latestRatio.toFixed(4)} DOT`;
+        inverseRateEl.innerText = `1 DOT = ${(1 / latestRatio).toFixed(4)} ATOM`;
+        subPricesEl.innerText = `ATOM: $${lastAtom.toFixed(2)} | DOT: $${lastDot.toFixed(2)}`;
+
+        // Odświeżenie wykresu
+        chartInstance.data.labels = labels;
+        chartInstance.data.datasets[0].data = ratios;
+        chartInstance.update();
+      } catch (err) {
+        console.error(err);
+        currentRateEl.innerText = 'Błąd pobierania';
+        inverseRateEl.innerText = 'Błąd pobierania';
+      } finally {
+        loaderEl.style.display = 'none';
+      }
+    }
+
+    // Obsługa przełączania interwałów
+    document.getElementById('intervals').addEventListener('click', (e) => {
+      if (e.target.tagName !== 'BUTTON') return;
+      document.querySelectorAll('#intervals button').forEach(b => b.classList.remove('active'));
+      e.target.classList.add('active');
+      activeTf = e.target.getAttribute('data-tf');
+      loadData(activeTf);
+    });
+
+    // Start
+    initChart();
+    loadData(activeTf);
+
+    // Auto-odświeżanie co 30 sekund
+    setInterval(() => loadData(activeTf), 30000);
+  </script>
+</body>
+</html>
