@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ATOM / DOT Tracker</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
   <style>
     :root {
       --bg: #0e1117;
@@ -184,6 +184,54 @@
 
     let activeTf = '24h';
     let chartInstance = null;
+    let loadRequest = 0;
+    const primaryDatasetIndex = 0;
+
+    function parseClose(value) {
+      if (value === null || value === undefined || value === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    }
+
+    function parseTimestamp(value) {
+      const parsed = Number(value);
+      if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+      const date = new Date(parsed);
+      return Number.isFinite(date.getTime()) ? parsed : null;
+    }
+
+    function lastValidValue(values) {
+      for (let index = values.length - 1; index >= 0; index--) {
+        if (Number.isFinite(values[index]) && values[index] > 0) return values[index];
+      }
+      return null;
+    }
+
+    function hasValidValue(values) {
+      return values.some((value) => Number.isFinite(value) && value > 0);
+    }
+
+    function formatTimestamp(timestamp, tfKey) {
+      const date = new Date(timestamp);
+      return (tfKey === '6m' || tfKey === '1y')
+        ? date.toLocaleDateString([], { month: 'short', day: 'numeric' })
+        : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+
+    if (Chart.Interaction && Chart.Interaction.modes) {
+      Chart.Interaction.modes.primaryIndex = (chart, event, options, useFinalPosition) => {
+        const primaryMetas = chart.getSortedVisibleDatasetMetas()
+          .filter((meta) => meta.index === primaryDatasetIndex);
+        const interactionChart = Object.create(chart);
+        interactionChart.getSortedVisibleDatasetMetas = () => primaryMetas;
+        return Chart.Interaction.modes.index(
+          interactionChart,
+          event,
+          options,
+          useFinalPosition,
+        );
+      };
+    }
 
     const currentRateEl = document.getElementById('currentRate');
     const inverseRateEl = document.getElementById('inverseRate');
@@ -193,35 +241,104 @@
     const priceLinesPlugin = {
       id: 'priceLines',
       afterDatasetsDraw(chart) {
-        const dataset = chart.data.datasets[0];
-        if (!dataset.data.length) return;
+        const dataset = chart.data.datasets[primaryDatasetIndex];
+        if (!dataset?.data?.length) return;
+
+        const validValues = dataset.data.filter((value) => Number.isFinite(value) && value > 0);
+        if (!validValues.length) return;
 
         const { ctx, chartArea, scales } = chart;
-        const activeElement = chart.getActiveElements()[0]?.element;
-        const referencePoint = activeElement || chart.getDatasetMeta(0).data[dataset.data.length - 1];
-        const latestPrice = dataset.data[dataset.data.length - 1];
-        const averagePrice = dataset.data.reduce((sum, price) => sum + price, 0) / dataset.data.length;
+        if (!ctx || !chartArea || !scales?.y) return;
+
+        const latestPrice = lastValidValue(dataset.data);
+        const averagePrice = validValues.reduce((sum, price) => sum + price, 0) / validValues.length;
+        const activeElement = chart.getActiveElements()
+          .find((element) => element.datasetIndex === primaryDatasetIndex)?.element;
+        const points = chart.getDatasetMeta(primaryDatasetIndex)?.data || [];
+        let referencePoint = activeElement;
+
+        if (!referencePoint || !Number.isFinite(referencePoint.x)) {
+          for (let index = dataset.data.length - 1; index >= 0; index--) {
+            if (Number.isFinite(dataset.data[index]) && points[index]) {
+              referencePoint = points[index];
+              break;
+            }
+          }
+        }
+
+        const labelHeight = 18;
+        const labelHalf = labelHeight / 2;
+        const minY = chartArea.top + labelHalf;
+        const maxY = chartArea.bottom - labelHalf;
+        if (maxY < minY) return;
+        const clampY = (value) => Math.min(Math.max(value, minY), maxY);
+        const latestLineY = clampY(scales.y.getPixelForValue(latestPrice));
+        const averageLineY = clampY(scales.y.getPixelForValue(averagePrice));
+        let latestY = latestLineY;
+        let averageY = clampY(averageLineY + 16);
+
+        if (Math.abs(latestY - averageY) <= 16) {
+          const gap = Math.abs(latestY - averageY);
+          if (gap < labelHeight) {
+            const needed = labelHeight - gap;
+            if (averageY > latestY) {
+              const roomAbove = latestY - minY;
+              if (roomAbove >= needed) {
+                latestY -= needed;
+              } else {
+                averageY = Math.min(maxY, averageY + (needed - roomAbove));
+              }
+            } else {
+              const roomBelow = maxY - averageY;
+              if (roomBelow >= needed) {
+                averageY += needed;
+              } else {
+                latestY = Math.max(minY, latestY - (needed - roomBelow));
+              }
+            }
+          }
+        }
+
+        const labels = [
+          { text: latestPrice.toFixed(2), y: latestY, color: '#ffd700' },
+          { text: averagePrice.toFixed(2), y: averageY, color: '#2ea043' }
+        ].sort((left, right) => left.y - right.y);
 
         ctx.save();
         ctx.lineWidth = 1;
 
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
-        ctx.beginPath();
-        ctx.moveTo(referencePoint.x, chartArea.top);
-        ctx.lineTo(referencePoint.x, chartArea.bottom);
-        ctx.stroke();
+        if (referencePoint && Number.isFinite(referencePoint.x)) {
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.85)';
+          ctx.beginPath();
+          ctx.moveTo(referencePoint.x, chartArea.top);
+          ctx.lineTo(referencePoint.x, chartArea.bottom);
+          ctx.stroke();
+        }
 
         ctx.strokeStyle = '#ffd700';
         ctx.beginPath();
-        ctx.moveTo(chartArea.left, scales.y.getPixelForValue(latestPrice));
-        ctx.lineTo(chartArea.right, scales.y.getPixelForValue(latestPrice));
+        ctx.moveTo(chartArea.left, latestLineY);
+        ctx.lineTo(chartArea.right, latestLineY);
         ctx.stroke();
 
         ctx.strokeStyle = '#2ea043';
         ctx.beginPath();
-        ctx.moveTo(chartArea.left, scales.y.getPixelForValue(averagePrice));
-        ctx.lineTo(chartArea.right, scales.y.getPixelForValue(averagePrice));
+        ctx.moveTo(chartArea.left, averageLineY);
+        ctx.lineTo(chartArea.right, averageLineY);
         ctx.stroke();
+
+        ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+
+        for (const label of labels) {
+          const labelX = chartArea.left + 6;
+          const textWidth = ctx.measureText(label.text).width;
+          ctx.fillStyle = 'rgba(14, 17, 23, 0.88)';
+          ctx.fillRect(labelX - 3, label.y - 9, textWidth + 6, 18);
+          ctx.fillStyle = label.color;
+          ctx.fillText(label.text, labelX, label.y);
+        }
 
         ctx.restore();
       }
@@ -248,6 +365,40 @@
             pointHitRadius: 10,
             fill: true,
             tension: 0.2
+          }, {
+            label: 'ATOM',
+            data: [],
+            yAxisID: 'yPrice',
+            borderColor: 'rgba(46, 160, 67, 0.58)',
+            backgroundColor: 'rgba(46, 160, 67, 0.08)',
+            borderWidth: 2,
+            showLine: true,
+            fill: false,
+            spanGaps: false,
+            pointRadius: 2,
+            pointHoverRadius: 4,
+            pointBackgroundColor: '#2ea043',
+            pointBorderColor: '#f0f6fc',
+            pointBorderWidth: 1,
+            pointHitRadius: 0,
+            tooltip: { enabled: false }
+          }, {
+            label: 'DOT',
+            data: [],
+            yAxisID: 'yPrice',
+            borderColor: 'rgba(188, 140, 255, 0.58)',
+            backgroundColor: 'rgba(188, 140, 255, 0.08)',
+            borderWidth: 2,
+            showLine: true,
+            fill: false,
+            spanGaps: false,
+            pointRadius: 2,
+            pointHoverRadius: 4,
+            pointBackgroundColor: '#bc8cff',
+            pointBorderColor: '#f0f6fc',
+            pointBorderWidth: 1,
+            pointHitRadius: 0,
+            tooltip: { enabled: false }
           }]
         },
         plugins: [priceLinesPlugin],
@@ -255,20 +406,28 @@
           responsive: true,
           maintainAspectRatio: false,
           interaction: {
-            mode: 'index',
+            mode: 'primaryIndex',
             intersect: false
           },
           plugins: {
-            legend: { display: false },
+            legend: {
+              display: true,
+              labels: {
+                filter: (legendItem) => ['ATOM', 'DOT'].includes(legendItem.text)
+              }
+            },
             tooltip: {
               displayColors: false,
+              filter: (tooltipItem) => tooltipItem.datasetIndex === primaryDatasetIndex,
               callbacks: {
-                label: (ctx) => {
-                  const atomDot = ctx.parsed.y;
-                  const dotAtom = atomDot ? 1 / atomDot : 0;
+                label: (tooltipItem) => {
+                  const atomDot = Number(tooltipItem.parsed.y);
+                  if (!Number.isFinite(atomDot) || atomDot <= 0) {
+                    return ['ATOM/DOT: --', 'DOT/ATOM: --'];
+                  }
                   return [
                     `ATOM/DOT: ${atomDot.toFixed(4)} DOT`,
-                    `DOT/ATOM: ${dotAtom.toFixed(4)} ATOM`
+                    `DOT/ATOM: ${(1 / atomDot).toFixed(4)} ATOM`
                   ];
                 }
               }
@@ -284,6 +443,18 @@
               ticks: {
                 color: '#8b949e',
                 callback: (val) => val.toFixed(4)
+              }
+            },
+            yPrice: {
+              position: 'right',
+              title: {
+                display: true,
+                text: 'USDT'
+              },
+              grid: { drawOnChartArea: false },
+              ticks: {
+                color: '#8b949e',
+                callback: (val) => `${Number(val).toFixed(2)} USDT`
               }
             }
           }
@@ -301,6 +472,7 @@
 
     // Aktualizacja widoku i wykresu
     async function loadData(tfKey) {
+      const requestId = ++loadRequest;
       loaderEl.style.display = 'block';
       const conf = TIMEFRAMES[tfKey];
 
@@ -309,47 +481,75 @@
           fetchKlines('ATOMUSDT', conf.interval, conf.limit),
           fetchKlines('DOTUSDT', conf.interval, conf.limit)
         ]);
+        if (requestId !== loadRequest) return;
 
-        const labels = [];
-        const ratios = [];
+        const atomByTimestamp = new Map();
+        const dotByTimestamp = new Map();
 
-        // Przeliczanie par punkt po punkcie
-        const len = Math.min(atomKlines.length, dotKlines.length);
-        for (let i = 0; i < len; i++) {
-          const timestamp = atomKlines[i][0];
-          const atomClose = parseFloat(atomKlines[i][4]);
-          const dotClose = parseFloat(dotKlines[i][4]);
-
-          const ratio = atomClose / dotClose;
-
-          const date = new Date(timestamp);
-          const formattedDate = (tfKey === '6m' || tfKey === '1y')
-            ? date.toLocaleDateString([], { month: 'short', day: 'numeric' })
-            : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-
-          labels.push(formattedDate);
-          ratios.push(ratio);
+        for (const kline of atomKlines) {
+          const timestamp = parseTimestamp(kline[0]);
+          if (timestamp !== null) atomByTimestamp.set(timestamp, parseClose(kline[4]));
         }
 
-        // Uaktualnienie nagłówka (ostatnia świeca)
-        const lastAtom = parseFloat(atomKlines[len - 1][4]);
-        const lastDot = parseFloat(dotKlines[len - 1][4]);
-        const latestRatio = lastAtom / lastDot;
+        for (const kline of dotKlines) {
+          const timestamp = parseTimestamp(kline[0]);
+          if (timestamp !== null) dotByTimestamp.set(timestamp, parseClose(kline[4]));
+        }
 
-        currentRateEl.innerText = `1 ATOM = ${latestRatio.toFixed(4)} DOT`;
-        inverseRateEl.innerText = `1 DOT = ${(1 / latestRatio).toFixed(4)} ATOM`;
-        subPricesEl.innerText = `ATOM: $${lastAtom.toFixed(2)} | DOT: $${lastDot.toFixed(2)}`;
+        const timestamps = Array.from(new Set([
+          ...atomByTimestamp.keys(),
+          ...dotByTimestamp.keys()
+        ])).sort((left, right) => left - right);
+        const labels = [];
+        const ratios = [];
+        const atomPrices = [];
+        const dotPrices = [];
 
-        // Odświeżenie wykresu
+        for (const timestamp of timestamps) {
+          const atomClose = atomByTimestamp.get(timestamp) ?? null;
+          const dotClose = dotByTimestamp.get(timestamp) ?? null;
+
+          labels.push(formatTimestamp(timestamp, tfKey));
+          atomPrices.push(atomClose);
+          dotPrices.push(dotClose);
+          ratios.push(atomClose !== null && dotClose !== null ? atomClose / dotClose : null);
+        }
+
+        const lastAtom = lastValidValue(atomPrices);
+        const lastDot = lastValidValue(dotPrices);
+        const lastAlignedRatio = ratios.findLast((ratio) => Number.isFinite(ratio) && ratio > 0);
+
+        if (lastAlignedRatio !== undefined) {
+          currentRateEl.innerText = `1 ATOM = ${lastAlignedRatio.toFixed(4)} DOT`;
+          inverseRateEl.innerText = `1 DOT = ${(1 / lastAlignedRatio).toFixed(4)} ATOM`;
+        } else {
+          currentRateEl.innerText = 'Brak danych';
+          inverseRateEl.innerText = 'Brak danych';
+        }
+
+        subPricesEl.innerText = `ATOM: ${lastAtom === null ? '$--' : `$${lastAtom.toFixed(2)}`} | DOT: ${lastDot === null ? '$--' : `$${lastDot.toFixed(2)}`}`;
+
         chartInstance.data.labels = labels;
         chartInstance.data.datasets[0].data = ratios;
+
+        if (chartInstance.data.datasets[1]) {
+          chartInstance.data.datasets[1].data = atomPrices;
+          chartInstance.setDatasetVisibility(1, hasValidValue(atomPrices));
+        }
+
+        if (chartInstance.data.datasets[2]) {
+          chartInstance.data.datasets[2].data = dotPrices;
+          chartInstance.setDatasetVisibility(2, hasValidValue(dotPrices));
+        }
+
         chartInstance.update();
       } catch (err) {
+        if (requestId !== loadRequest) return;
         console.error(err);
         currentRateEl.innerText = 'Błąd pobierania';
         inverseRateEl.innerText = 'Błąd pobierania';
       } finally {
-        loaderEl.style.display = 'none';
+        if (requestId === loadRequest) loaderEl.style.display = 'none';
       }
     }
 
