@@ -12,6 +12,7 @@
       --border: #30363d;
       --text: #c9d1d9;
       --text-bright: #f0f6fc;
+      --muted: #8b949e;
       --primary: #58a6ff;
       --accent: #238636;
       --accent-hover: #2ea043;
@@ -97,12 +98,45 @@
     .arrow.down { color: #f85149; }
     .arrow.flat { color: #ffd700; }
 
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 10px 20px;
+      margin-bottom: 20px;
+    }
+
     .btn-group {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
-      margin-bottom: 20px;
     }
+
+    .chart-legend {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px 18px;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      white-space: nowrap;
+    }
+
+    .legend-line {
+      width: 18px;
+      height: 2px;
+      border-radius: 1px;
+    }
+
+    .legend-line.current { background-color: #ffd700; }
+    .legend-line.average { background-color: #2ea043; }
 
     button {
       background-color: var(--bg);
@@ -209,15 +243,21 @@
     </div>
 
     <!-- Przyciski interwałów -->
-    <div class="btn-group" id="intervals">
-      <button data-tf="1h">1h</button>
-      <button data-tf="4h">4h</button>
-      <button data-tf="8h">8h</button>
-      <button data-tf="24h" class="active">24h</button>
-      <button data-tf="7d">7d</button>
-      <button data-tf="30d">30d</button>
-      <button data-tf="6m">6m</button>
-      <button data-tf="1y">1y</button>
+    <div class="toolbar">
+      <div class="btn-group" id="intervals">
+        <button data-tf="1h">1h</button>
+        <button data-tf="4h">4h</button>
+        <button data-tf="8h">8h</button>
+        <button data-tf="24h" class="active">24h</button>
+        <button data-tf="7d">7d</button>
+        <button data-tf="30d">30d</button>
+        <button data-tf="6m">6m</button>
+        <button data-tf="1y">1y</button>
+      </div>
+      <div class="chart-legend">
+        <span class="legend-item"><span class="legend-line current"></span>aktualne ratio</span>
+        <span class="legend-item"><span class="legend-line average"></span>średnie ratio w zakresie</span>
+      </div>
     </div>
 
     <div class="chart-box">
@@ -266,6 +306,11 @@
     let solChartInstance = null;
     let loadRequest = 0;
     const primaryDatasetIndex = 0;
+
+    // Żywy kurs z tickera Binance. Żółta linia na wykresie pokazuje tę
+    // wartość, a nie close ostatniej świecy, który przy interwałach dobowych
+    // może być sprzed wielu godzin.
+    let currentRatio = null;
 
     function parseClose(value) {
       if (value === null || value === undefined || value === '') return null;
@@ -381,6 +426,12 @@
       return value < 10 ? value.toFixed(4) : value.toFixed(2);
     }
 
+    // Kurs ATOM/SOL jest rzęd wielkości 0.01, więc cztery miejsca po
+    // przecinku; przy dwóch etykiety zlewałyby się w jedną wartość.
+    function formatRatio(value) {
+      return Number.isFinite(value) && value > 0 ? value.toFixed(4) : '--';
+    }
+
     function directionArrow(direction) {
       if (direction === 'up') return { text: '↑', className: 'up' };
       if (direction === 'down') return { text: '↓', className: 'down' };
@@ -427,7 +478,9 @@
         const { ctx, chartArea, scales } = chart;
         if (!ctx || !chartArea || !scales?.y) return;
 
-        const latestPrice = lastValidValue(dataset.data);
+        // Aktualny kurs z tickera; gdy jeszcze nie dotarł, wykres pokazuje
+        // close ostatniej dostępnej świecy.
+        const latestPrice = currentRatio ?? lastValidValue(dataset.data);
         const averagePrice = validValues.reduce((sum, price) => sum + price, 0) / validValues.length;
         const activeElement = chart.getActiveElements()
           .find((element) => element.datasetIndex === primaryDatasetIndex)?.element;
@@ -488,8 +541,8 @@
         }
 
         const labels = [
-          { text: latestPrice.toFixed(2), y: latestY, color: '#ffd700' },
-          { text: averagePrice.toFixed(2), y: averageY, color: '#2ea043' }
+          { text: formatRatio(latestPrice), y: latestY, color: '#ffd700' },
+          { text: formatRatio(averagePrice), y: averageY, color: '#2ea043' }
         ].sort((left, right) => left.y - right.y);
 
         ctx.save();
@@ -669,6 +722,25 @@
       return await res.json();
     }
 
+    // Aktualna cena pojedynczej pary z tickera
+    async function fetchTickerPrice(symbol) {
+      const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Błąd pobierania danych');
+      const data = await res.json();
+      return parseClose(data.price);
+    }
+
+    // Żywy kurs ATOM/SOL liczony z bieżących cen obu aktywów
+    async function fetchCurrentRatio() {
+      const [atomPrice, solPrice] = await Promise.all([
+        fetchTickerPrice('ATOMUSDC'),
+        fetchTickerPrice('SOLUSDC')
+      ]);
+      if (!atomPrice || !solPrice) return null;
+      return atomPrice / solPrice;
+    }
+
     // Aktualizacja widoku i wykresu
     async function loadData(tfKey) {
       const requestId = ++loadRequest;
@@ -681,6 +753,26 @@
           fetchKlines('SOLUSDC', conf.interval, conf.limit)
         ]);
         if (requestId !== loadRequest) return;
+
+        // Kursor żywego kursu: osobne zapytanie, żeby błąd tickera nie
+        // unieruchamiał wykresu opartego na k-line'ach.
+        fetchCurrentRatio()
+          .then((ratio) => {
+            if (requestId !== loadRequest || ratio === null) return;
+            currentRatio = ratio;
+            // Skala Y liczy się z serii świec, więc żywy kurs czasem
+            // wypada poza jej zakres i linia przykleja się do krawędzi.
+            const series = chartInstance.data.datasets[primaryDatasetIndex].data
+              .filter((value) => Number.isFinite(value) && value > 0);
+            if (series.length) {
+              const lowest = Math.min(...series);
+              const highest = Math.max(...series);
+              if (ratio > highest) chartInstance.options.scales.y.max = ratio * 1.02;
+              else if (ratio < lowest) chartInstance.options.scales.y.min = ratio * 0.98;
+            }
+            chartInstance.update('none');
+          })
+          .catch(() => {});
 
         const atomByTimestamp = new Map();
         const solByTimestamp = new Map();
@@ -716,11 +808,12 @@
 
         const lastAtom = lastValidValue(atomPrices);
         const lastDot = lastValidValue(solPrices);
-        const lastAlignedRatio = ratios.findLast((ratio) => Number.isFinite(ratio) && ratio > 0);
+        const lastAlignedRatio = currentRatio
+          ?? ratios.findLast((ratio) => Number.isFinite(ratio) && ratio > 0);
 
-        if (lastAlignedRatio !== undefined) {
-          currentRateEl.innerText = `1 ATOM = ${lastAlignedRatio.toFixed(4)} SOL`;
-          inverseRateEl.innerText = `1 SOL = ${(1 / lastAlignedRatio).toFixed(4)} ATOM`;
+        if (lastAlignedRatio !== undefined && lastAlignedRatio !== null) {
+          currentRateEl.innerText = `1 ATOM = ${formatRatio(lastAlignedRatio)} SOL`;
+          inverseRateEl.innerText = `1 SOL = ${formatRatio(1 / lastAlignedRatio)} ATOM`;
         } else {
           currentRateEl.innerText = 'Brak danych';
           inverseRateEl.innerText = 'Brak danych';
@@ -742,6 +835,10 @@
         atomPriceEl.innerText = lastAtom === null ? '$--' : `$${formatUsd(lastAtom)}`;
         solPriceEl.innerText = lastDot === null ? '$--' : `$${formatUsd(lastDot)}`;
 
+        // Skala wraca do automatycznej przy zmianie interwału, bo poprzedni
+        // zakres mógł został rozszerzony pod żywy kurs.
+        delete chartInstance.options.scales.y.min;
+        delete chartInstance.options.scales.y.max;
         chartInstance.data.labels = labels;
         chartInstance.data.datasets[0].data = ratios;
         chartInstance.update();
