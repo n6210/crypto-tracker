@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ATOM / DOT Tracker</title>
+  <title>ATOM / SOL Tracker</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js"></script>
   <style>
     :root {
@@ -58,6 +58,7 @@
       align-items: baseline;
       flex-wrap: wrap;
       gap: 4px 10px;
+      white-space: nowrap;
     }
 
     .title-group h1 {
@@ -82,11 +83,19 @@
     }
 
     .sub-prices {
-      flex-basis: 100%;
       font-size: 0.9rem;
       color: #8b949e;
-      margin-top: 4px;
     }
+
+    .arrow {
+      font-weight: 700;
+      font-size: 1rem;
+      line-height: 1;
+    }
+
+    .arrow.up { color: #3fb950; }
+    .arrow.down { color: #f85149; }
+    .arrow.flat { color: #8b949e; }
 
     .btn-group {
       display: flex;
@@ -124,6 +133,53 @@
       width: 100%;
     }
 
+    .price-charts {
+      display: flex;
+      gap: 16px;
+      margin-top: 20px;
+    }
+
+    .price-card {
+      flex: 1 1 0;
+      min-width: 0;
+      background-color: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .price-card-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .price-card h2 {
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .price-card-value {
+      font-size: 0.8rem;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .price-card.atom h2 { color: #2ea043; }
+    .price-card.atom .price-card-value { color: #2ea043; }
+    .price-card.sol h2 { color: #bc8cff; }
+    .price-card.sol .price-card-value { color: #bc8cff; }
+
+    .price-chart-box {
+      position: relative;
+      height: 200px;
+      width: 100%;
+    }
+
     .loader {
       display: none;
       position: absolute;
@@ -143,11 +199,12 @@
   <div class="container">
     <div class="header">
       <div class="title-group">
-        <h1>ATOM / DOT</h1>
+        <h1>ATOM / SOL</h1>
         <div class="current-rate" id="currentRate">Ładowanie...</div>
         <span class="rate-separator">|</span>
         <div class="inverse-rate" id="inverseRate">Ładowanie...</div>
-        <div class="sub-prices" id="subPrices">ATOM: $-- | DOT: $--</div>
+        <span class="rate-separator">|</span>
+        <div class="sub-prices" id="subPrices">ATOM: $-- | SOL: $--</div>
       </div>
     </div>
 
@@ -167,6 +224,27 @@
       <div class="loader" id="loader">Pobieranie danych z rynku...</div>
       <canvas id="ratioChart"></canvas>
     </div>
+
+    <div class="price-charts">
+      <div class="price-card atom">
+        <div class="price-card-head">
+          <h2>ATOM / USDC</h2>
+          <div class="price-card-value" id="atomPrice">$--</div>
+        </div>
+        <div class="price-chart-box">
+          <canvas id="atomChart"></canvas>
+        </div>
+      </div>
+      <div class="price-card sol">
+        <div class="price-card-head">
+          <h2>SOL / USDC</h2>
+          <div class="price-card-value" id="solPrice">$--</div>
+        </div>
+        <div class="price-chart-box">
+          <canvas id="solChart"></canvas>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -184,6 +262,8 @@
 
     let activeTf = '24h';
     let chartInstance = null;
+    let atomChartInstance = null;
+    let solChartInstance = null;
     let loadRequest = 0;
     const primaryDatasetIndex = 0;
 
@@ -207,8 +287,104 @@
       return null;
     }
 
-    function hasValidValue(values) {
-      return values.some((value) => Number.isFinite(value) && value > 0);
+    // Zwraca posortowane pozycje X zajęte przez serię w paśmie Y.
+    // Uwzględnia też odcinki linii między punktami, bo sama siatka punktów
+    // jest zbyt rzadka, żeby wykryć stromo opadający fragment w paśmie.
+    function collectOccupiedX(points, validData, bandTop, bandBottom) {
+      const occupied = [];
+      let previous = null;
+
+      for (let index = 0; index < points.length; index++) {
+        const point = points[index];
+        const value = Number(validData[index]);
+        const isValid = point && Number.isFinite(point.x) && Number.isFinite(value) && value > 0;
+
+        if (!isValid) {
+          previous = null;
+          continue;
+        }
+
+        if (point.y >= bandTop && point.y <= bandBottom) {
+          occupied.push(point.x);
+        }
+
+        if (previous) {
+          const spanX = point.x - previous.x;
+          const spanY = point.y - previous.y;
+          const steps = Math.max(1, Math.ceil(Math.max(Math.abs(spanX), Math.abs(spanY)) / 3));
+          for (let step = 1; step < steps; step++) {
+            const ratio = step / steps;
+            const sampleX = previous.x + spanX * ratio;
+            const sampleY = previous.y + spanY * ratio;
+            if (sampleY >= bandTop && sampleY <= bandBottom) {
+              occupied.push(sampleX);
+            }
+          }
+        }
+
+        previous = { x: point.x, y: point.y };
+      }
+
+      return occupied.sort((left, right) => left - right);
+    }
+
+    // Domyślnie środek wykresu; gdy okno etykiety zachodzi na serię,
+    // szuka najbliższej pozycji wolnej. Zwraca null, gdy nie ma miejsca.
+    function findLabelX(occupied, labelWidth, chartArea) {
+      const half = labelWidth / 2;
+      const centerX = (chartArea.left + chartArea.right) / 2;
+      const minCenter = chartArea.left + half;
+      const maxCenter = chartArea.right - half;
+      if (minCenter > maxCenter) return null;
+
+      const isBlocked = (candidate) => {
+        const from = candidate - half;
+        const to = candidate + half;
+        return occupied.some((x) => x >= from - 4 && x <= to + 4);
+      };
+
+      if (!isBlocked(centerX)) return centerX;
+
+      let bestX = null;
+      let bestDistance = Infinity;
+
+      for (let candidate = minCenter; candidate <= maxCenter; candidate += 4) {
+        if (isBlocked(candidate)) continue;
+        const distance = Math.abs(candidate - centerX);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestX = candidate;
+        }
+      }
+
+      return bestX;
+    }
+
+    // Kierunek ostatniej świecy: open vs close z ostatniego k-line'a.
+    // Zwraca 'up', 'down' albo null, gdy brakuje poprawnych danych.
+    function lastCandleDirection(klines) {
+      for (let index = klines.length - 1; index >= 0; index--) {
+        const kline = klines[index];
+        if (!kline) continue;
+        const open = parseClose(kline[1]);
+        const close = parseClose(kline[4]);
+        if (open === null || close === null) continue;
+        if (close > open) return 'up';
+        if (close < open) return 'down';
+        return null;
+      }
+      return null;
+    }
+
+    // Ceny poniżej $10 dostają cztery miejsca po przecinku, powyżej dwa.
+    function formatUsd(value) {
+      return value < 10 ? value.toFixed(4) : value.toFixed(2);
+    }
+
+    function directionArrow(direction) {
+      if (direction === 'up') return { text: '↑', className: 'up' };
+      if (direction === 'down') return { text: '↓', className: 'down' };
+      return { text: '→', className: 'flat' };
     }
 
     function formatTimestamp(timestamp, tfKey) {
@@ -218,24 +394,11 @@
         : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
 
-    if (Chart.Interaction && Chart.Interaction.modes) {
-      Chart.Interaction.modes.primaryIndex = (chart, event, options, useFinalPosition) => {
-        const primaryMetas = chart.getSortedVisibleDatasetMetas()
-          .filter((meta) => meta.index === primaryDatasetIndex);
-        const interactionChart = Object.create(chart);
-        interactionChart.getSortedVisibleDatasetMetas = () => primaryMetas;
-        return Chart.Interaction.modes.index(
-          interactionChart,
-          event,
-          options,
-          useFinalPosition,
-        );
-      };
-    }
-
     const currentRateEl = document.getElementById('currentRate');
     const inverseRateEl = document.getElementById('inverseRate');
     const subPricesEl = document.getElementById('subPrices');
+    const atomPriceEl = document.getElementById('atomPrice');
+    const solPriceEl = document.getElementById('solPrice');
     const loaderEl = document.getElementById('loader');
 
     const priceLinesPlugin = {
@@ -275,25 +438,36 @@
         const latestLineY = clampY(scales.y.getPixelForValue(latestPrice));
         const averageLineY = clampY(scales.y.getPixelForValue(averagePrice));
         let latestY = latestLineY;
-        let averageY = clampY(averageLineY + 16);
+        let averageY = averageLineY;
 
-        if (Math.abs(latestY - averageY) <= 16) {
-          const gap = Math.abs(latestY - averageY);
-          if (gap < labelHeight) {
-            const needed = labelHeight - gap;
-            if (averageY > latestY) {
+        // Obie etykiety startują dokładnie na swoich liniach; odsuwamy tylko wtedy,
+        // gdy nachodzą na siebie i w obrębie wykresu nie ma miejsca na rozdzielenie.
+        if (Math.abs(latestY - averageY) < labelHeight) {
+          const needed = labelHeight - Math.abs(latestY - averageY);
+          if (averageY >= latestY) {
+            const roomBelow = maxY - averageY;
+            if (roomBelow >= needed) {
+              averageY += needed;
+            } else {
               const roomAbove = latestY - minY;
               if (roomAbove >= needed) {
                 latestY -= needed;
               } else {
-                averageY = Math.min(maxY, averageY + (needed - roomAbove));
+                averageY = Math.min(maxY, averageY + needed);
+                latestY = Math.max(minY, latestY - Math.max(0, needed - roomBelow));
               }
+            }
+          } else {
+            const roomBelow = maxY - latestY;
+            if (roomBelow >= needed) {
+              latestY += needed;
             } else {
-              const roomBelow = maxY - averageY;
-              if (roomBelow >= needed) {
-                averageY += needed;
+              const roomAbove = averageY - minY;
+              if (roomAbove >= needed) {
+                averageY -= needed;
               } else {
-                latestY = Math.max(minY, latestY - (needed - roomBelow));
+                latestY = Math.min(maxY, latestY + needed);
+                averageY = Math.max(minY, averageY - Math.max(0, needed - roomBelow));
               }
             }
           }
@@ -328,14 +502,20 @@
         ctx.stroke();
 
         ctx.font = '12px -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-        ctx.textAlign = 'left';
+        ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
+        const centerX = (chartArea.left + chartArea.right) / 2;
+
         for (const label of labels) {
-          const labelX = chartArea.left + 6;
           const textWidth = ctx.measureText(label.text).width;
-          ctx.fillStyle = 'rgba(14, 17, 23, 0.88)';
-          ctx.fillRect(labelX - 3, label.y - 9, textWidth + 6, 18);
+          const labelX = findLabelX(
+            collectOccupiedX(points, dataset.data, label.y - 9, label.y + 9),
+            textWidth + 8,
+            chartArea,
+          ) ?? centerX;
+          ctx.fillStyle = 'rgba(14, 17, 23, 0.92)';
+          ctx.fillRect(labelX - textWidth / 2 - 4, label.y - 9, textWidth + 8, 18);
           ctx.fillStyle = label.color;
           ctx.fillText(label.text, labelX, label.y);
         }
@@ -352,7 +532,7 @@
         data: {
           labels: [],
           datasets: [{
-            label: '1 ATOM = x DOT',
+            label: '1 ATOM = x SOL',
             data: [],
             borderColor: '#58a6ff',
             backgroundColor: 'rgba(88, 166, 255, 0.08)',
@@ -365,40 +545,6 @@
             pointHitRadius: 10,
             fill: true,
             tension: 0.2
-          }, {
-            label: 'ATOM',
-            data: [],
-            yAxisID: 'yPrice',
-            borderColor: 'rgba(46, 160, 67, 0.58)',
-            backgroundColor: 'rgba(46, 160, 67, 0.08)',
-            borderWidth: 2,
-            showLine: true,
-            fill: false,
-            spanGaps: false,
-            pointRadius: 2,
-            pointHoverRadius: 4,
-            pointBackgroundColor: '#2ea043',
-            pointBorderColor: '#f0f6fc',
-            pointBorderWidth: 1,
-            pointHitRadius: 0,
-            tooltip: { enabled: false }
-          }, {
-            label: 'DOT',
-            data: [],
-            yAxisID: 'yPrice',
-            borderColor: 'rgba(188, 140, 255, 0.58)',
-            backgroundColor: 'rgba(188, 140, 255, 0.08)',
-            borderWidth: 2,
-            showLine: true,
-            fill: false,
-            spanGaps: false,
-            pointRadius: 2,
-            pointHoverRadius: 4,
-            pointBackgroundColor: '#bc8cff',
-            pointBorderColor: '#f0f6fc',
-            pointBorderWidth: 1,
-            pointHitRadius: 0,
-            tooltip: { enabled: false }
           }]
         },
         plugins: [priceLinesPlugin],
@@ -406,28 +552,24 @@
           responsive: true,
           maintainAspectRatio: false,
           interaction: {
-            mode: 'primaryIndex',
+            mode: 'index',
             intersect: false
           },
           plugins: {
             legend: {
-              display: true,
-              labels: {
-                filter: (legendItem) => ['ATOM', 'DOT'].includes(legendItem.text)
-              }
+              display: false
             },
             tooltip: {
               displayColors: false,
-              filter: (tooltipItem) => tooltipItem.datasetIndex === primaryDatasetIndex,
               callbacks: {
                 label: (tooltipItem) => {
-                  const atomDot = Number(tooltipItem.parsed.y);
-                  if (!Number.isFinite(atomDot) || atomDot <= 0) {
-                    return ['ATOM/DOT: --', 'DOT/ATOM: --'];
+                  const atomSol = Number(tooltipItem.parsed.y);
+                  if (!Number.isFinite(atomSol) || atomSol <= 0) {
+                    return ['ATOM/SOL: --', 'SOL/ATOM: --'];
                   }
                   return [
-                    `ATOM/DOT: ${atomDot.toFixed(4)} DOT`,
-                    `DOT/ATOM: ${(1 / atomDot).toFixed(4)} ATOM`
+                    `ATOM/SOL: ${atomSol.toFixed(4)} SOL`,
+                    `SOL/ATOM: ${(1 / atomSol).toFixed(4)} ATOM`
                   ];
                 }
               }
@@ -439,22 +581,65 @@
               ticks: { color: '#8b949e', maxTicksLimit: 8 }
             },
             y: {
+              position: 'right',
               grid: { color: '#21262d' },
               ticks: {
                 color: '#8b949e',
                 callback: (val) => val.toFixed(4)
               }
+            }
+          }
+        }
+      });
+    }
+
+    // Osobny wykres ceny jednego aktywa w USDC
+    function initPriceChart(canvasId, borderColor, fillColor) {
+      const ctx = document.getElementById(canvasId).getContext('2d');
+      return new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [{
+            data: [],
+            borderColor: borderColor,
+            backgroundColor: fillColor,
+            borderWidth: 2,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            pointHitRadius: 10,
+            fill: true,
+            tension: 0.2
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              displayColors: false,
+              callbacks: {
+                label: (tooltipItem) => {
+                  const price = Number(tooltipItem.parsed.y);
+                  return Number.isFinite(price) ? `${price.toFixed(4)} USDC` : '--';
+                }
+              }
+            }
+          },
+          scales: {
+            x: {
+              grid: { color: '#21262d' },
+              ticks: { color: '#8b949e', maxTicksLimit: 4 }
             },
-            yPrice: {
+            y: {
               position: 'right',
-              title: {
-                display: true,
-                text: 'USDT'
-              },
-              grid: { drawOnChartArea: false },
+              grid: { color: '#21262d' },
               ticks: {
                 color: '#8b949e',
-                callback: (val) => `${Number(val).toFixed(2)} USDT`
+                maxTicksLimit: 5,
+                callback: (val) => `$${Number(val).toFixed(2)}`
               }
             }
           }
@@ -477,72 +662,87 @@
       const conf = TIMEFRAMES[tfKey];
 
       try {
-        const [atomKlines, dotKlines] = await Promise.all([
-          fetchKlines('ATOMUSDT', conf.interval, conf.limit),
-          fetchKlines('DOTUSDT', conf.interval, conf.limit)
+        const [atomKlines, solKlines] = await Promise.all([
+          fetchKlines('ATOMUSDC', conf.interval, conf.limit),
+          fetchKlines('SOLUSDC', conf.interval, conf.limit)
         ]);
         if (requestId !== loadRequest) return;
 
         const atomByTimestamp = new Map();
-        const dotByTimestamp = new Map();
+        const solByTimestamp = new Map();
 
         for (const kline of atomKlines) {
           const timestamp = parseTimestamp(kline[0]);
           if (timestamp !== null) atomByTimestamp.set(timestamp, parseClose(kline[4]));
         }
 
-        for (const kline of dotKlines) {
+        for (const kline of solKlines) {
           const timestamp = parseTimestamp(kline[0]);
-          if (timestamp !== null) dotByTimestamp.set(timestamp, parseClose(kline[4]));
+          if (timestamp !== null) solByTimestamp.set(timestamp, parseClose(kline[4]));
         }
 
         const timestamps = Array.from(new Set([
           ...atomByTimestamp.keys(),
-          ...dotByTimestamp.keys()
+          ...solByTimestamp.keys()
         ])).sort((left, right) => left - right);
         const labels = [];
         const ratios = [];
         const atomPrices = [];
-        const dotPrices = [];
+        const solPrices = [];
 
         for (const timestamp of timestamps) {
           const atomClose = atomByTimestamp.get(timestamp) ?? null;
-          const dotClose = dotByTimestamp.get(timestamp) ?? null;
+          const solClose = solByTimestamp.get(timestamp) ?? null;
 
           labels.push(formatTimestamp(timestamp, tfKey));
           atomPrices.push(atomClose);
-          dotPrices.push(dotClose);
-          ratios.push(atomClose !== null && dotClose !== null ? atomClose / dotClose : null);
+          solPrices.push(solClose);
+          ratios.push(atomClose !== null && solClose !== null ? atomClose / solClose : null);
         }
 
         const lastAtom = lastValidValue(atomPrices);
-        const lastDot = lastValidValue(dotPrices);
+        const lastDot = lastValidValue(solPrices);
         const lastAlignedRatio = ratios.findLast((ratio) => Number.isFinite(ratio) && ratio > 0);
 
         if (lastAlignedRatio !== undefined) {
-          currentRateEl.innerText = `1 ATOM = ${lastAlignedRatio.toFixed(4)} DOT`;
-          inverseRateEl.innerText = `1 DOT = ${(1 / lastAlignedRatio).toFixed(4)} ATOM`;
+          currentRateEl.innerText = `1 ATOM = ${lastAlignedRatio.toFixed(4)} SOL`;
+          inverseRateEl.innerText = `1 SOL = ${(1 / lastAlignedRatio).toFixed(4)} ATOM`;
         } else {
           currentRateEl.innerText = 'Brak danych';
           inverseRateEl.innerText = 'Brak danych';
         }
 
-        subPricesEl.innerText = `ATOM: ${lastAtom === null ? '$--' : `$${lastAtom.toFixed(2)}`} | DOT: ${lastDot === null ? '$--' : `$${lastDot.toFixed(2)}`}`;
+        const atomArrow = directionArrow(lastCandleDirection(atomKlines));
+        const solArrow = directionArrow(lastCandleDirection(solKlines));
+        const atomPriceText = lastAtom === null ? '$--' : `$${lastAtom.toFixed(2)}`;
+        const solPriceText = lastDot === null ? '$--' : `$${lastDot.toFixed(2)}`;
+
+        subPricesEl.innerHTML = [
+          `ATOM: ${atomPriceText}`,
+          `<span class="arrow ${atomArrow.className}">${atomArrow.text}</span>`,
+          '|',
+          `SOL: ${solPriceText}`,
+          `<span class="arrow ${solArrow.className}">${solArrow.text}</span>`
+        ].join(' ');
+
+        atomPriceEl.innerText = lastAtom === null ? '$--' : `$${formatUsd(lastAtom)}`;
+        solPriceEl.innerText = lastDot === null ? '$--' : `$${formatUsd(lastDot)}`;
 
         chartInstance.data.labels = labels;
         chartInstance.data.datasets[0].data = ratios;
-
-        if (chartInstance.data.datasets[1]) {
-          chartInstance.data.datasets[1].data = atomPrices;
-          chartInstance.setDatasetVisibility(1, hasValidValue(atomPrices));
-        }
-
-        if (chartInstance.data.datasets[2]) {
-          chartInstance.data.datasets[2].data = dotPrices;
-          chartInstance.setDatasetVisibility(2, hasValidValue(dotPrices));
-        }
-
         chartInstance.update();
+
+        if (atomChartInstance) {
+          atomChartInstance.data.labels = labels;
+          atomChartInstance.data.datasets[0].data = atomPrices;
+          atomChartInstance.update();
+        }
+
+        if (solChartInstance) {
+          solChartInstance.data.labels = labels;
+          solChartInstance.data.datasets[0].data = solPrices;
+          solChartInstance.update();
+        }
       } catch (err) {
         if (requestId !== loadRequest) return;
         console.error(err);
@@ -564,6 +764,8 @@
 
     // Start
     initChart();
+    atomChartInstance = initPriceChart('atomChart', '#2ea043', 'rgba(46, 160, 67, 0.12)');
+    solChartInstance = initPriceChart('solChart', '#bc8cff', 'rgba(188, 140, 255, 0.12)');
     loadData(activeTf);
 
     // Auto-odświeżanie co 30 sekund
