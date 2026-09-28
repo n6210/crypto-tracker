@@ -731,14 +731,28 @@
       return parseClose(data.price);
     }
 
-    // Żywy kurs ATOM/SOL liczony z bieżących cen obu aktywów
-    async function fetchCurrentRatio() {
+    // Żywe ceny obu aktywów z tickera. Zwraca null, gdy Binance nie odpowiada,
+    // bo wykres oparty na k-line'ach musi działać także wtedy.
+    async function fetchLivePrices() {
       const [atomPrice, solPrice] = await Promise.all([
         fetchTickerPrice('ATOMUSDC'),
         fetchTickerPrice('SOLUSDC')
       ]);
       if (!atomPrice || !solPrice) return null;
-      return atomPrice / solPrice;
+      return { atom: atomPrice, sol: solPrice, ratio: atomPrice / solPrice };
+    }
+
+    // Skala Y liczy się z serii świec, więc żywy kurs czasem wypada poza
+    // jej zakres i żółta linia przykleja się do krawędzi wykresu.
+    function applyRatioScale() {
+      const values = chartInstance.data.datasets[primaryDatasetIndex].data
+        .filter((value) => Number.isFinite(value) && value > 0);
+      if (!values.length || currentRatio === null) return;
+
+      const lowest = Math.min(...values);
+      const highest = Math.max(...values);
+      if (currentRatio > highest) chartInstance.options.scales.y.max = currentRatio * 1.02;
+      else if (currentRatio < lowest) chartInstance.options.scales.y.min = currentRatio * 0.98;
     }
 
     // Aktualizacja widoku i wykresu
@@ -748,31 +762,14 @@
       const conf = TIMEFRAMES[tfKey];
 
       try {
-        const [atomKlines, solKlines] = await Promise.all([
+        const [atomKlines, solKlines, live] = await Promise.all([
           fetchKlines('ATOMUSDC', conf.interval, conf.limit),
-          fetchKlines('SOLUSDC', conf.interval, conf.limit)
+          fetchKlines('SOLUSDC', conf.interval, conf.limit),
+          fetchLivePrices().catch(() => null)
         ]);
         if (requestId !== loadRequest) return;
 
-        // Kursor żywego kursu: osobne zapytanie, żeby błąd tickera nie
-        // unieruchamiał wykresu opartego na k-line'ach.
-        fetchCurrentRatio()
-          .then((ratio) => {
-            if (requestId !== loadRequest || ratio === null) return;
-            currentRatio = ratio;
-            // Skala Y liczy się z serii świec, więc żywy kurs czasem
-            // wypada poza jej zakres i linia przykleja się do krawędzi.
-            const series = chartInstance.data.datasets[primaryDatasetIndex].data
-              .filter((value) => Number.isFinite(value) && value > 0);
-            if (series.length) {
-              const lowest = Math.min(...series);
-              const highest = Math.max(...series);
-              if (ratio > highest) chartInstance.options.scales.y.max = ratio * 1.02;
-              else if (ratio < lowest) chartInstance.options.scales.y.min = ratio * 0.98;
-            }
-            chartInstance.update('none');
-          })
-          .catch(() => {});
+        currentRatio = live ? live.ratio : null;
 
         const atomByTimestamp = new Map();
         const solByTimestamp = new Map();
@@ -797,8 +794,17 @@
         const solPrices = [];
 
         for (const timestamp of timestamps) {
-          const atomClose = atomByTimestamp.get(timestamp) ?? null;
-          const solClose = solByTimestamp.get(timestamp) ?? null;
+          let atomClose = atomByTimestamp.get(timestamp) ?? null;
+          let solClose = solByTimestamp.get(timestamp) ?? null;
+
+          // Binance zwraca świecę w trakcie tworzenia tylko dla jednej
+          // z par, więc na końcu serii zostaje dziura: wykres rwie linię
+          // i ostatni punkt zostaje bez połączenia. Brakujący close
+          // uzupełniamy bieżącą ceną z tickera.
+          if (live) {
+            if (atomClose === null) atomClose = live.atom;
+            if (solClose === null) solClose = live.sol;
+          }
 
           labels.push(formatTimestamp(timestamp, tfKey));
           atomPrices.push(atomClose);
@@ -836,11 +842,13 @@
         solPriceEl.innerText = lastDot === null ? '$--' : `$${formatUsd(lastDot)}`;
 
         // Skala wraca do automatycznej przy zmianie interwału, bo poprzedni
-        // zakres mógł został rozszerzony pod żywy kurs.
+        // zakres mógł zostać rozszerzony pod żywy kurs. Potem rozszerzamy ją
+        // ponownie, gdyby żywy kurs wypadł poza zakres serii świec.
         delete chartInstance.options.scales.y.min;
         delete chartInstance.options.scales.y.max;
         chartInstance.data.labels = labels;
         chartInstance.data.datasets[0].data = ratios;
+        applyRatioScale();
         chartInstance.update();
 
         if (atomChartInstance) {
