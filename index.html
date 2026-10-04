@@ -70,6 +70,48 @@
       margin: 0;
     }
 
+    .symbol-button {
+      padding: 2px 4px;
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border-color: transparent;
+      border-bottom: 1px dashed var(--muted);
+      border-radius: 3px;
+    }
+
+    .symbol-button:focus-visible { outline: 2px solid var(--primary); }
+
+    .symbol-editor {
+      margin: -8px 0 20px;
+      font-size: 0.85rem;
+    }
+
+    .symbol-editor[hidden] { display: none; }
+
+    .symbol-editor-controls {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .symbol-editor input {
+      width: 140px;
+      padding: 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-bright);
+      font-size: 0.9rem;
+      text-transform: uppercase;
+    }
+
+    .symbol-editor input:focus { outline: 2px solid var(--primary); }
+    .symbol-editor button:disabled { opacity: 0.6; cursor: wait; }
+    .symbol-message { margin-top: 8px; color: var(--muted); }
+    .symbol-message.error { color: #f85149; }
+
     .current-rate,
     .inverse-rate {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -233,7 +275,7 @@
   <div class="container">
     <div class="header">
       <div class="title-group">
-        <h1>ATOM / SOL</h1>
+        <h1><button type="button" class="symbol-button" id="baseSymbol" title="Zmień symbol przeliczanej waluty" aria-label="Zmień symbol przeliczanej waluty" aria-controls="symbolEditor" aria-expanded="false">ATOM</button> / <button type="button" class="symbol-button" id="quoteSymbol" title="Zmień symbol waluty docelowej" aria-label="Zmień symbol waluty docelowej" aria-controls="symbolEditor" aria-expanded="false">SOL</button></h1>
         <div class="current-rate" id="currentRate">Ładowanie...</div>
         <span class="rate-separator">|</span>
         <div class="inverse-rate" id="inverseRate">Ładowanie...</div>
@@ -241,6 +283,16 @@
         <div class="sub-prices" id="subPrices">ATOM: $-- | SOL: $--</div>
       </div>
     </div>
+
+    <form class="symbol-editor" id="symbolEditor" hidden>
+      <div class="symbol-editor-controls">
+        <label for="symbolInput" id="symbolLabel">Nowy symbol:</label>
+        <input id="symbolInput" type="text" maxlength="20" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-describedby="symbolMessage" required />
+        <button type="submit" id="symbolSave">Zapisz</button>
+        <button type="button" id="symbolCancel">Anuluj</button>
+      </div>
+      <p class="symbol-message" id="symbolMessage" role="status" aria-live="polite">Wpisz symbol, np. BTC. Wymagany aktywny rynek w USDC na Binance.</p>
+    </form>
 
     <!-- Przyciski interwałów -->
     <div class="toolbar">
@@ -268,7 +320,7 @@
     <div class="price-charts">
       <div class="price-card atom">
         <div class="price-card-head">
-          <h2>ATOM / USDC</h2>
+          <h2 id="basePriceTitle">ATOM / USDC</h2>
           <div class="price-card-value" id="atomPrice">$--</div>
         </div>
         <div class="price-chart-box">
@@ -277,7 +329,7 @@
       </div>
       <div class="price-card sol">
         <div class="price-card-head">
-          <h2>SOL / USDC</h2>
+          <h2 id="quotePriceTitle">SOL / USDC</h2>
           <div class="price-card-value" id="solPrice">$--</div>
         </div>
         <div class="price-chart-box">
@@ -300,6 +352,18 @@
       '1y':  { interval: '1d',  limit: 365 }
     };
 
+    const PAIR_STORAGE_KEY = 'crypto-tracker.pair.v1';
+    const validSymbol = (symbol) => typeof symbol === 'string' && /^[A-Z0-9]{1,20}$/.test(symbol);
+
+    function readSavedPair() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(PAIR_STORAGE_KEY));
+        if (saved && validSymbol(saved.base) && validSymbol(saved.quote)) return saved;
+      } catch (_) { /* Przeglądarka może blokować dostęp do pamięci. */ }
+      return { base: 'ATOM', quote: 'SOL' };
+    }
+
+    let selectedPair = readSavedPair();
     let activeTf = '24h';
     let chartInstance = null;
     let atomChartInstance = null;
@@ -426,10 +490,10 @@
       return value < 10 ? value.toFixed(4) : value.toFixed(2);
     }
 
-    // Kurs ATOM/SOL jest rzęd wielkości 0.01, więc cztery miejsca po
-    // przecinku; przy dwóch etykiety zlewałyby się w jedną wartość.
+    // Małe kursy innych par również muszą pozostać czytelne.
     function formatRatio(value) {
-      return Number.isFinite(value) && value > 0 ? value.toFixed(4) : '--';
+      if (!Number.isFinite(value) || value <= 0) return '--';
+      return value < 0.001 ? Number(value.toPrecision(4)).toString() : value.toFixed(4);
     }
 
     function directionArrow(direction) {
@@ -465,6 +529,134 @@
     const atomPriceEl = document.getElementById('atomPrice');
     const solPriceEl = document.getElementById('solPrice');
     const loaderEl = document.getElementById('loader');
+
+    const symbolEditor = document.getElementById('symbolEditor');
+    const symbolInput = document.getElementById('symbolInput');
+    const symbolSave = document.getElementById('symbolSave');
+    const symbolMessage = document.getElementById('symbolMessage');
+    const symbolButtons = {
+      base: document.getElementById('baseSymbol'),
+      quote: document.getElementById('quoteSymbol')
+    };
+    let editingSide = null;
+    let validationRequest = 0;
+
+    function updatePairLabels() {
+      const { base, quote } = selectedPair;
+      symbolButtons.base.textContent = base;
+      symbolButtons.quote.textContent = quote;
+      document.title = `${base} / ${quote} Tracker`;
+      document.getElementById('basePriceTitle').textContent = `${base} / USDC`;
+      document.getElementById('quotePriceTitle').textContent = `${quote} / USDC`;
+      currentRateEl.textContent = 'Ładowanie...';
+      inverseRateEl.textContent = 'Ładowanie...';
+      subPricesEl.textContent = `${base}: $-- | ${quote}: $--`;
+      atomPriceEl.textContent = '$--';
+      solPriceEl.textContent = '$--';
+      if (chartInstance) chartInstance.data.datasets[0].label = `1 ${base} = x ${quote}`;
+    }
+
+    function closeSymbolEditor() {
+      validationRequest++;
+      const button = symbolButtons[editingSide];
+      editingSide = null;
+      symbolEditor.hidden = true;
+      symbolSave.disabled = false;
+      Object.values(symbolButtons).forEach((el) => el.setAttribute('aria-expanded', 'false'));
+      button?.focus();
+    }
+
+    for (const side of ['base', 'quote']) {
+      symbolButtons[side].addEventListener('click', () => {
+        validationRequest++;
+        editingSide = side;
+        symbolEditor.hidden = false;
+        symbolSave.disabled = false;
+        symbolInput.value = selectedPair[side];
+        symbolMessage.classList.remove('error');
+        symbolMessage.textContent = 'Wpisz symbol, np. BTC. Wymagany aktywny rynek w USDC na Binance.';
+        document.getElementById('symbolLabel').textContent = side === 'base'
+          ? 'Przeliczaj z:' : 'Przeliczaj na:';
+        Object.entries(symbolButtons).forEach(([key, el]) => el.setAttribute('aria-expanded', String(key === side)));
+        symbolInput.focus();
+        symbolInput.select();
+      });
+    }
+
+    document.getElementById('symbolCancel').addEventListener('click', closeSymbolEditor);
+    symbolEditor.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSymbolEditor();
+      }
+    });
+
+    async function validateMarket(symbol) {
+      const marketSymbol = `${symbol}USDC`;
+      const response = await fetch(`https://api.binance.com/api/v3/exchangeInfo?symbol=${encodeURIComponent(marketSymbol)}`);
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}));
+        if (error.code === -1121) throw new Error(`Brak rynku ${symbol} / USDC na Binance.`);
+        throw new Error('Nie udało się sprawdzić symbolu na Binance. Spróbuj ponownie.');
+      }
+      const data = await response.json();
+      const market = data.symbols?.find((item) => item.symbol === marketSymbol
+        && item.baseAsset === symbol && item.quoteAsset === 'USDC');
+      if (!market || market.status !== 'TRADING' || market.isSpotTradingAllowed !== true) {
+        throw new Error(`Brak aktywnego rynku spot ${symbol} / USDC na Binance.`);
+      }
+    }
+
+    symbolEditor.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!editingSide || symbolSave.disabled) return;
+      const side = editingSide;
+      const symbol = symbolInput.value.trim().toUpperCase();
+      symbolInput.value = symbol;
+      symbolMessage.classList.remove('error');
+      if (!validSymbol(symbol)) {
+        symbolMessage.classList.add('error');
+        symbolMessage.textContent = 'Wpisz symbol waluty (litery i cyfry), np. BTC.';
+        return;
+      }
+      const requestId = ++validationRequest;
+      symbolSave.disabled = true;
+      symbolMessage.textContent = 'Sprawdzanie symbolu na Binance...';
+      try {
+        await validateMarket(symbol);
+        if (requestId !== validationRequest) return;
+        selectedPair = { ...selectedPair, [side]: symbol };
+        let saved = true;
+        try { localStorage.setItem(PAIR_STORAGE_KEY, JSON.stringify(selectedPair)); }
+        catch (_) { saved = false; }
+        // Usuń dane poprzedniej pary, zanim nowe odpowiedzi dotrą z giełdy.
+        ++loadRequest;
+        currentRatio = null;
+        updatePairLabels();
+        for (const chart of [chartInstance, atomChartInstance, solChartInstance]) {
+          if (!chart) continue;
+          chart.data.labels = [];
+          chart.data.datasets[0].data = [];
+          delete chart.options.scales.y.min;
+          delete chart.options.scales.y.max;
+          chart.update();
+        }
+        closeSymbolEditor();
+        if (!saved) {
+          symbolEditor.hidden = false;
+          symbolMessage.classList.add('error');
+          symbolMessage.textContent = 'Para zmieniona. Przeglądarka blokuje zapis — wybór nie zostanie zapamiętany.';
+        }
+        loadData(activeTf);
+      } catch (error) {
+        if (requestId !== validationRequest) return;
+        symbolMessage.classList.add('error');
+        symbolMessage.textContent = error.message === 'Failed to fetch'
+          ? 'Nie udało się połączyć z Binance. Spróbuj ponownie.' : error.message;
+      } finally {
+        if (requestId === validationRequest) symbolSave.disabled = false;
+      }
+    });
 
     const priceLinesPlugin = {
       id: 'priceLines',
@@ -599,7 +791,7 @@
         data: {
           labels: [],
           datasets: [{
-            label: '1 ATOM = x SOL',
+            label: `1 ${selectedPair.base} = x ${selectedPair.quote}`,
             data: [],
             borderColor: '#58a6ff',
             backgroundColor: 'rgba(88, 166, 255, 0.08)',
@@ -632,11 +824,11 @@
                 label: (tooltipItem) => {
                   const atomSol = Number(tooltipItem.parsed.y);
                   if (!Number.isFinite(atomSol) || atomSol <= 0) {
-                    return ['ATOM/SOL: --', 'SOL/ATOM: --'];
+                    return [`${selectedPair.base}/${selectedPair.quote}: --`, `${selectedPair.quote}/${selectedPair.base}: --`];
                   }
                   return [
-                    `ATOM/SOL: ${atomSol.toFixed(4)} SOL`,
-                    `SOL/ATOM: ${(1 / atomSol).toFixed(4)} ATOM`
+                    `${selectedPair.base}/${selectedPair.quote}: ${formatRatio(atomSol)} ${selectedPair.quote}`,
+                    `${selectedPair.quote}/${selectedPair.base}: ${formatRatio(1 / atomSol)} ${selectedPair.base}`
                   ];
                 }
               }
@@ -652,7 +844,7 @@
               grid: { color: '#21262d' },
               ticks: {
                 color: '#8b949e',
-                callback: (val) => val.toFixed(4)
+                callback: (val) => formatRatio(Number(val))
               }
             }
           }
@@ -733,10 +925,10 @@
 
     // Żywe ceny obu aktywów z tickera. Zwraca null, gdy Binance nie odpowiada,
     // bo wykres oparty na k-line'ach musi działać także wtedy.
-    async function fetchLivePrices() {
+    async function fetchLivePrices(pair) {
       const [atomPrice, solPrice] = await Promise.all([
-        fetchTickerPrice('ATOMUSDC'),
-        fetchTickerPrice('SOLUSDC')
+        fetchTickerPrice(`${pair.base}USDC`),
+        fetchTickerPrice(`${pair.quote}USDC`)
       ]);
       if (!atomPrice || !solPrice) return null;
       return { atom: atomPrice, sol: solPrice, ratio: atomPrice / solPrice };
@@ -760,12 +952,13 @@
       const requestId = ++loadRequest;
       loaderEl.style.display = 'block';
       const conf = TIMEFRAMES[tfKey];
+      const pair = { ...selectedPair };
 
       try {
         const [atomKlines, solKlines, live] = await Promise.all([
-          fetchKlines('ATOMUSDC', conf.interval, conf.limit),
-          fetchKlines('SOLUSDC', conf.interval, conf.limit),
-          fetchLivePrices().catch(() => null)
+          fetchKlines(`${pair.base}USDC`, conf.interval, conf.limit),
+          fetchKlines(`${pair.quote}USDC`, conf.interval, conf.limit),
+          fetchLivePrices(pair).catch(() => null)
         ]);
         if (requestId !== loadRequest) return;
 
@@ -818,8 +1011,8 @@
           ?? ratios.findLast((ratio) => Number.isFinite(ratio) && ratio > 0);
 
         if (lastAlignedRatio !== undefined && lastAlignedRatio !== null) {
-          currentRateEl.innerText = `1 ATOM = ${formatRatio(lastAlignedRatio)} SOL`;
-          inverseRateEl.innerText = `1 SOL = ${formatRatio(1 / lastAlignedRatio)} ATOM`;
+          currentRateEl.innerText = `1 ${pair.base} = ${formatRatio(lastAlignedRatio)} ${pair.quote}`;
+          inverseRateEl.innerText = `1 ${pair.quote} = ${formatRatio(1 / lastAlignedRatio)} ${pair.base}`;
         } else {
           currentRateEl.innerText = 'Brak danych';
           inverseRateEl.innerText = 'Brak danych';
@@ -831,10 +1024,10 @@
         const solPriceText = lastDot === null ? '$--' : `$${lastDot.toFixed(2)}`;
 
         subPricesEl.innerHTML = [
-          `ATOM: ${atomPriceText}`,
+          `${pair.base}: ${atomPriceText}`,
           `<span class="arrow ${atomArrow.className}">${atomArrow.text}</span>`,
           '|',
-          `SOL: ${solPriceText}`,
+          `${pair.quote}: ${solPriceText}`,
           `<span class="arrow ${solArrow.className}">${solArrow.text}</span>`
         ].join(' ');
 
@@ -882,6 +1075,7 @@
     });
 
     // Start
+    updatePairLabels();
     initChart();
     atomChartInstance = initPriceChart('atomChart', '#2ea043', 'rgba(46, 160, 67, 0.12)');
     solChartInstance = initPriceChart('solChart', '#bc8cff', 'rgba(188, 140, 255, 0.12)');

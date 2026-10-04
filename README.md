@@ -41,10 +41,18 @@ nie z odrębnych ostatnich cen — inaczej wykres skakałby przy rozjechanych
 
 ## Zmiana pary
 
-Para zaszyta jest w kilku miejscach `index.html`: w nagłówku UI, w wywołaniach
-`fetchKlines()` oraz w konfiguracji datasetów i kolorów. Aby przejść na inną
-parę, trzeba zaktualizować te miejsca. Selektor `TIMEFRAMES` na górze skryptu
-steruje interwałami i liczbą świec.
+Kliknij lewy lub prawy symbol w nagłówku, wpisz nowy (np. `BTC` lub `ETH`)
+i zatwierdź przyciskiem **Zapisz** lub Enter. Aplikacja sprawdza w Binance
+`exchangeInfo`, czy istnieje aktywny rynek spot danego aktywa w USDC.
+Nieprawidłowy symbol lub błąd połączenia pozostawia dotychczasową parę.
+**Anuluj** lub Escape zamyka edycję.
+
+Oba symbole są zapisywane w `localStorage` przeglądarki i przywracane po
+odświeżeniu. Kurs, kurs odwrotny, opisy i wszystkie trzy wykresy korzystają
+z wybranej pary. Nie jest wymagana bezpośrednia para między aktywami —
+przeliczenie odbywa się przez ich ceny w USDC. Jeśli przeglądarka blokuje
+zapis, aplikacja wyświetla informację, a wybór działa do zamknięcia strony.
+Selektor `TIMEFRAMES` na górze skryptu steruje interwałami i liczbą świec.
 
 ## Struktura
 
