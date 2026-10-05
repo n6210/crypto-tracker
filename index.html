@@ -57,6 +57,7 @@
 
     .title-group {
       display: flex;
+      width: 100%;
       align-items: baseline;
       flex-wrap: wrap;
       gap: 4px 10px;
@@ -130,6 +131,35 @@
       font-size: 0.9rem;
       color: #8b949e;
     }
+
+    .amount-control {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .amount-control input {
+      width: 76px;
+      padding: 4px 6px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text-bright);
+      font: inherit;
+      appearance: textfield;
+      -moz-appearance: textfield;
+    }
+
+    .amount-control input::-webkit-inner-spin-button,
+    .amount-control input::-webkit-outer-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    .amount-control input:focus { outline: 2px solid var(--primary); }
 
     .arrow {
       font-weight: 700;
@@ -282,6 +312,10 @@
         <div class="inverse-rate" id="inverseRate">Ładowanie...</div>
         <span class="rate-separator">|</span>
         <div class="sub-prices" id="subPrices">ATOM: $-- | SOL: $--</div>
+        <label class="amount-control" for="conversionAmount">
+          <span id="amountLabel">Ilość ATOM</span>
+          <input id="conversionAmount" type="number" min="0" step="any" value="1" inputmode="decimal" />
+        </label>
       </div>
     </div>
 
@@ -527,6 +561,7 @@
     const currentRateEl = document.getElementById('currentRate');
     const inverseRateEl = document.getElementById('inverseRate');
     const subPricesEl = document.getElementById('subPrices');
+    const conversionAmountEl = document.getElementById('conversionAmount');
     const atomPriceEl = document.getElementById('atomPrice');
     const solPriceEl = document.getElementById('solPrice');
     const loaderEl = document.getElementById('loader');
@@ -546,6 +581,7 @@
       const { base, quote } = selectedPair;
       symbolButtons.base.textContent = base;
       symbolButtons.quote.textContent = quote;
+      document.getElementById('amountLabel').textContent = `Ilość ${base}`;
       document.title = `${base} / ${quote} Tracker`;
       document.getElementById('basePriceTitle').textContent = `${base} / USDC`;
       document.getElementById('quotePriceTitle').textContent = `${quote} / USDC`;
@@ -827,9 +863,14 @@
                   if (!Number.isFinite(atomSol) || atomSol <= 0) {
                     return [`${selectedPair.base}/${selectedPair.quote}: --`, `${selectedPair.quote}/${selectedPair.base}: --`];
                   }
+                  const amount = conversionAmountEl.valueAsNumber;
+                  const converted = amount * atomSol;
                   return [
                     `${selectedPair.base}/${selectedPair.quote}: ${formatRatio(atomSol)} ${selectedPair.quote}`,
-                    `${selectedPair.quote}/${selectedPair.base}: ${formatRatio(1 / atomSol)} ${selectedPair.base}`
+                    `${selectedPair.quote}/${selectedPair.base}: ${formatRatio(1 / atomSol)} ${selectedPair.base}`,
+                    Number.isFinite(amount) && amount >= 0 && Number.isFinite(converted)
+                      ? `${amount} ${selectedPair.base} → ${converted === 0 ? '0' : formatRatio(converted)} ${selectedPair.quote}`
+                      : `Ilość ${selectedPair.base} → — ${selectedPair.quote}`
                   ];
                 }
               }
