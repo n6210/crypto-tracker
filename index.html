@@ -83,6 +83,30 @@
 
     .symbol-button:focus-visible { outline: 2px solid var(--primary); }
 
+    .swap-button {
+      display: inline-grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      padding: 0;
+      vertical-align: middle;
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: 0;
+      border-radius: 4px;
+    }
+
+    .swap-button > * { grid-area: 1 / 1; }
+    .swap-button svg { width: 18px; height: 18px; opacity: 0; }
+    .swap-button:hover,
+    .swap-button:focus-visible { color: var(--primary); }
+    .swap-button:hover .swap-slash,
+    .swap-button:focus-visible .swap-slash { opacity: 0; }
+    .swap-button:hover svg,
+    .swap-button:focus-visible svg { opacity: 1; }
+    .swap-button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
     .symbol-editor {
       margin: -8px 0 20px;
       font-size: 0.85rem;
@@ -305,7 +329,7 @@
   <div class="container">
     <div class="header">
       <div class="title-group">
-        <h1><button type="button" class="symbol-button" id="baseSymbol" title="Zmień symbol przeliczanej waluty" aria-label="Zmień symbol przeliczanej waluty" aria-controls="symbolEditor" aria-expanded="false">ATOM</button> / <button type="button" class="symbol-button" id="quoteSymbol" title="Zmień symbol waluty docelowej" aria-label="Zmień symbol waluty docelowej" aria-controls="symbolEditor" aria-expanded="false">SOL</button></h1>
+        <h1><button type="button" class="symbol-button" id="baseSymbol" title="Zmień symbol przeliczanej waluty" aria-label="Zmień symbol przeliczanej waluty" aria-controls="symbolEditor" aria-expanded="false">ATOM</button> <button type="button" class="swap-button" id="swapSymbols" title="Zamień symbole miejscami" aria-label="Zamień symbole miejscami"><span class="swap-slash" aria-hidden="true">/</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7a8 8 0 0 0-14-1L3 9m0-5v5h5M4 17a8 8 0 0 0 14 1l3-3m0 5v-5h-5" /></svg></button> <button type="button" class="symbol-button" id="quoteSymbol" title="Zmień symbol waluty docelowej" aria-label="Zmień symbol waluty docelowej" aria-controls="symbolEditor" aria-expanded="false">SOL</button></h1>
         <div class="current-rate" id="currentRate">Ładowanie...</div>
         <span class="rate-separator">|</span>
         <div class="inverse-rate" id="inverseRate">Ładowanie...</div>
@@ -627,6 +651,37 @@
       }
     });
 
+    function applyPairChange() {
+      let saved = true;
+      try { localStorage.setItem(PAIR_STORAGE_KEY, JSON.stringify(selectedPair)); }
+      catch (_) { saved = false; }
+      // Usuń dane poprzedniej pary, zanim nowe odpowiedzi dotrą z giełdy.
+      ++loadRequest;
+      currentRatio = null;
+      updatePairLabels();
+      for (const chart of [chartInstance, atomChartInstance, solChartInstance]) {
+        if (!chart) continue;
+        chart.data.labels = [];
+        chart.data.datasets[0].data = [];
+        delete chart.options.scales.y.min;
+        delete chart.options.scales.y.max;
+        chart.update();
+    }
+    closeSymbolEditor();
+    if (!saved) {
+      symbolEditor.hidden = false;
+      symbolMessage.classList.add('error');
+      symbolMessage.textContent = 'Para zmieniona. Przeglądarka blokuje zapis — wybór nie zostanie zapamiętany.';
+    }
+    loadData(activeTf);
+    }
+
+    document.getElementById('swapSymbols').addEventListener('click', (event) => {
+      selectedPair = { base: selectedPair.quote, quote: selectedPair.base };
+      applyPairChange();
+      event.currentTarget.focus();
+    });
+
     async function validateMarket(symbol) {
       const marketSymbol = `${symbol}USDC`;
       const response = await fetch(`https://api.binance.com/api/v3/exchangeInfo?symbol=${encodeURIComponent(marketSymbol)}`);
@@ -662,28 +717,7 @@
         await validateMarket(symbol);
         if (requestId !== validationRequest) return;
         selectedPair = { ...selectedPair, [side]: symbol };
-        let saved = true;
-        try { localStorage.setItem(PAIR_STORAGE_KEY, JSON.stringify(selectedPair)); }
-        catch (_) { saved = false; }
-        // Usuń dane poprzedniej pary, zanim nowe odpowiedzi dotrą z giełdy.
-        ++loadRequest;
-        currentRatio = null;
-        updatePairLabels();
-        for (const chart of [chartInstance, atomChartInstance, solChartInstance]) {
-          if (!chart) continue;
-          chart.data.labels = [];
-          chart.data.datasets[0].data = [];
-          delete chart.options.scales.y.min;
-          delete chart.options.scales.y.max;
-          chart.update();
-        }
-        closeSymbolEditor();
-        if (!saved) {
-          symbolEditor.hidden = false;
-          symbolMessage.classList.add('error');
-          symbolMessage.textContent = 'Para zmieniona. Przeglądarka blokuje zapis — wybór nie zostanie zapamiętany.';
-        }
-        loadData(activeTf);
+        applyPairChange();
       } catch (error) {
         if (requestId !== validationRequest) return;
         symbolMessage.classList.add('error');
